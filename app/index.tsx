@@ -1,35 +1,66 @@
+ 
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   Alert,
   BackHandler,
+  Platform,
   StatusBar,
   StyleSheet,
   Text,
   TouchableOpacity,
-  View
+  View,
 } from 'react-native';
 
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import Constants from 'expo-constants';
+import * as Application from 'expo-application';
+import * as Device from 'expo-device';
 import * as ScreenOrientation from 'expo-screen-orientation';
-import { SafeAreaView } from 'react-native-safe-area-context';
+import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 import { WebView } from 'react-native-webview';
 
-// Adjust these imports based on your project structure
-import OnboardingSkeleton from '../src/components/OnboardingSkeleton';
-import OnboardingScreen from '../src/components/OnboardingScreen';
+// Import your components
+import OnboardingScreen from './src/components/OnboardingScreen';
+import OnboardingSkeleton from './src/components/OnboardingSkeleton';
 
-const WEB_URL = 'https://your-web-url.com'; // <-- Update this URL
-const VENDOR_CODE = 'demoVendor'; // <-- Update this
-const DOMAIN_NAME = 'your-web-url.com'; // <-- Update this
-const APP_VERSION = Constants.expoConfig?.version ?? '1.0.0';
+// Configuration constants
+const WEB_URL = 'https://student.closm.com';
+const VENDOR_CODE = 'DLVBC';
+const DOMAIN_NAME = 'student.closm.com';
+const APP_VERSION = '1.0.0';
 
-export default function HomeScreen() {
+function MainApp() {
   const webViewRef = useRef<WebView>(null);
   const [onboardingScreen, setOnboardingScreen] = useState(false);
   const [canGoBack, setCanGoBack] = useState(false);
   const [webViewError, setWebViewError] = useState(false);
   const [isAppReady, setIsAppReady] = useState(false);
+  const [cookieScript, setCookieScript] = useState('');
+
+  const getCookieScript = async () => {
+    const deviceId = await Application.getIosIdForVendorAsync() || Device.deviceName || 'unknown';
+    const version = Platform.OS === 'android' 
+      ? Application.nativeApplicationVersion || APP_VERSION
+      : `${Application.nativeApplicationVersion || APP_VERSION}(${Application.nativeBuildVersion || '1'})`;
+    const osVersion = Device.osVersion || 'unknown';
+
+    const cookies = [
+      { name: 'appPlatform', value: Platform.OS },
+      { name: 'appVersion', value: APP_VERSION || version },
+      { name: '_appVersion', value: version },
+      { name: 'deviceId', value: deviceId },
+      { name: 'osVersion', value: osVersion },
+      { name: 'isRn', value: 1 },
+      { name: 'vendorCode', value: VENDOR_CODE },
+    ];
+
+    const domain = DOMAIN_NAME;
+    const expires = new Date(Date.now() + 365 * 24 * 60 * 60 * 1000).toUTCString();
+
+    return cookies.map(
+      ({ name, value }) =>
+        `document.cookie = "${name}=${value}; domain=${domain}; path=/; secure; expires=${expires}";`
+    ).join('\n');
+  };
 
   const checkOnboardingStatus = async () => {
     try {
@@ -40,14 +71,27 @@ export default function HomeScreen() {
     }
   };
 
-  const onMessage = useCallback(async (event: any) => {
+  const onMessage = useCallback(async (event: { nativeEvent: { data: string } }) => {
     try {
       const message = JSON.parse(event.nativeEvent.data);
-      if (typeof message.type !== 'string') throw new Error('Invalid message format');
+      if (typeof message.type !== 'string') {
+        throw new Error('Invalid message format');
+      }
 
       switch (message.type) {
+        case 'GOOGLE_SIGN_IN':
+          // TODO: Implement Google Sign-In with Expo AuthSession
+          console.log('Google Sign-In requested');
+          webViewRef.current?.postMessage(JSON.stringify({ 
+            type: 'SIGN_IN_SUCCESS', 
+            data: { message: 'Google Sign-In not implemented yet' } 
+          }));
+          break;
+        case 'IS_FOR_RN_LOGIN':
+          webViewRef.current?.postMessage(JSON.stringify({ type: 'SET_FOR_RN_LOGIN', data: {} }));
+          break;
         case 'KILL_RELAUNCH':
-          Alert.alert('App Update Required', 'Please restart the app.', [
+          Alert.alert('App Update Required', 'A critical update is needed. Please restart the app.', [
             { text: 'Exit', onPress: () => BackHandler.exitApp() },
           ]);
           break;
@@ -57,15 +101,23 @@ export default function HomeScreen() {
             await ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.LANDSCAPE);
           } else if (mode === 'portrait') {
             await ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.PORTRAIT);
-          } else {
+          } else if (mode === 'unlock') {
             await ScreenOrientation.unlockAsync();
+          } else {
+            console.warn('[Orientation] Unknown mode:', message);
           }
           break;
         default:
           console.warn('[WebView] Unknown message type:', message.type);
       }
-    } catch (error) {
-      console.error('[onMessage error]', error);
+    } catch (error: any) {
+      console.error('[WebView onMessage] Error:', error);
+      webViewRef.current?.postMessage(
+        JSON.stringify({
+          type: 'SIGN_IN_ERROR',
+          data: { error: error.message || 'Unexpected error occurred' },
+        })
+      );
     }
   }, []);
 
@@ -77,6 +129,8 @@ export default function HomeScreen() {
   useEffect(() => {
     const initializeApp = async () => {
       try {
+        const script = await getCookieScript();
+        setCookieScript(script);
         await checkOnboardingStatus();
       } catch (err) {
         console.error('[initializeApp] Error:', err);
@@ -86,7 +140,6 @@ export default function HomeScreen() {
         }, 2000);
       }
     };
-
     initializeApp();
   }, []);
 
@@ -142,7 +195,7 @@ export default function HomeScreen() {
 
   return (
     <>
-      <StatusBar barStyle="dark-content" />
+      <StatusBar barStyle="light-content" />
       <SafeAreaView style={styles.container} edges={['top', 'bottom']}>
         <View style={styles.webViewContainer}>
           <WebView
@@ -152,29 +205,39 @@ export default function HomeScreen() {
             bounces={false}
             javaScriptEnabled
             onMessage={onMessage}
-            onNavigationStateChange={(navState: any) => setCanGoBack(navState.canGoBack)}
+            onNavigationStateChange={(navState) => setCanGoBack(navState.canGoBack)}
             onError={() => setWebViewError(true)}
+            onHttpError={({ nativeEvent }) => {
+              console.error(`HTTP error: ${nativeEvent.statusCode}`);
+              setWebViewError(true);
+            }}
+            injectedJavaScriptBeforeContentLoaded={cookieScript}
             injectedJavaScript={`
               (function() {
-                var existing = document.querySelector('meta[name=viewport]');
-                if (existing) {
-                  existing.setAttribute('content', 'width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no');
-                } else {
-                  var meta = document.createElement('meta');
-                  meta.name = 'viewport';
-                  meta.content = 'width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no';
-                  document.head.appendChild(meta);
+                try {
+                  var existing = document.querySelector('meta[name=viewport]');
+                  if (existing) {
+                    existing.setAttribute('content', 'width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no');
+                  } else {
+                    var meta = document.createElement('meta');
+                    meta.name = 'viewport';
+                    meta.content = 'width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no';
+                    document.head.appendChild(meta);
+                  }
+                  document.cookie = "isRn=1; path=/;";
+                } catch (e) {
+                  console.error("Injected JS error", e);
                 }
-                document.cookie = "isRn=1; path=/;";
                 true;
               })();
             `}
             scalesPageToFit={false}
             allowsFullscreenVideo={true}
+            style={styles.webView}
             domStorageEnabled
+            setSupportMultipleWindows={false}
             thirdPartyCookiesEnabled
             webviewDebuggingEnabled={true}
-            style={styles.webView}
           />
         </View>
       </SafeAreaView>
@@ -182,10 +245,25 @@ export default function HomeScreen() {
   );
 }
 
+export default function App() {
+  return (
+    <SafeAreaProvider>
+      <MainApp />
+    </SafeAreaProvider>
+  );
+}
+
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: 'white' },
-  webViewContainer: { flex: 1 },
-  webView: { flex: 1 },
+  container: {
+    flex: 1,
+    backgroundColor: 'white',
+  },
+  webViewContainer: {
+    flex: 1,
+  },
+  webView: {
+    flex: 1,
+  },
   splashContainer: {
     flex: 1,
     justifyContent: 'center',
